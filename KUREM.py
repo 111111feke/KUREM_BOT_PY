@@ -146,7 +146,6 @@ class AdminAnswerForm(StatesGroup):
 async def _read_json(path: str) -> dict | list:
     """Читает JSON-файл. Возвращает пустой dict/list если файл не существует."""
     if not os.path.exists(path):
-        # Выбираем тип по тому, какой файл читаем
         return [] if path in (TASKS_FILE, QUESTIONS_FILE) else {}
     async with aiofiles.open(path, "r", encoding="utf-8") as f:
         content = await f.read()
@@ -213,6 +212,7 @@ async def db_create_user_task(user_id: int, template_id: int, status: str = "vie
         "status":      status,
         "user_answer": None,
         "answer_type": None,
+        "media_type":  None,
         "admin_grade": None,
         "created_at":  datetime.now().isoformat(),
     })
@@ -227,12 +227,14 @@ async def db_delete_task(task_id: int) -> None:
     await _write_json(TASKS_FILE, tasks)
 
 
-async def db_update_task_answer(task_id: int, answer: str, answer_type: str) -> None:
+# ИЗМЕНЕНО: добавлен параметр media_type
+async def db_update_task_answer(task_id: int, answer: str, answer_type: str, media_type: str | None = None) -> None:
     tasks: list = await _read_json(TASKS_FILE)
     for task in tasks:
         if task["id"] == task_id:
             task["user_answer"] = answer
             task["answer_type"] = answer_type
+            task["media_type"]  = media_type
             task["status"]      = "pending_review"
             break
     await _write_json(TASKS_FILE, tasks)
@@ -265,9 +267,8 @@ async def db_grade_task(task_id: int, grade: int) -> int | bool | None:
 
     for task in tasks:
         if task["id"] == task_id:
-            # ЗАЩИТА: проверяем, не проверил ли уже кто-то другой
             if task["status"] != "pending_review":
-                return False  # Задание уже оценено
+                return False
 
             task["admin_grade"] = grade
             task["status"] = "completed"
@@ -291,7 +292,6 @@ async def db_grade_task(task_id: int, grade: int) -> int | bool | None:
 
 async def db_get_task_info(task_id: int) -> dict | None:
     tasks: list = await _read_json(TASKS_FILE)
-    users: dict = await _read_json(USERS_FILE)
     for t in tasks:
         if t["id"] == task_id:
             template = next((tmpl for tmpl in TASK_TEMPLATES if tmpl["id"] == t["template_id"]), {})
@@ -425,7 +425,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def privacy_agree(callback: types.CallbackQuery, state: FSMContext):
     user = await db_get_user(callback.from_user.id)
     if user:
-        # Уже зарегистрирован — просто открываем меню
         await callback.message.edit_text("Вы уже зарегистрированы! Добро пожаловать.")
         await callback.message.answer(TEXTS["main_menu"], reply_markup=get_main_menu_kb())
         return
@@ -490,7 +489,6 @@ async def do_task(message: types.Message, state: FSMContext):
 
 
 async def task_refuse(callback: types.CallbackQuery, state: FSMContext):
-    # Исправлено: удаляем висящее задание со статусом "viewing"
     data = await state.get_data()
     task_id = data.get("current_task_id")
     if task_id:
@@ -500,12 +498,9 @@ async def task_refuse(callback: types.CallbackQuery, state: FSMContext):
 
 
 async def task_do(callback: types.CallbackQuery, state: FSMContext):
-    # Получаем данные из машины состояний
     data = await state.get_data()
-    # Достаем текст задания (или заглушку, если вдруг его там нет)
     task_text = data.get("task_text", "Текст задания потерян 😔")
 
-    # Формируем новый текст, который включает и само задание, и новый вопрос
     new_message_text = (
         f"📋 Ваше задание:\n\n{task_text}\n\n"
         f"👇 Отлично! Выберите формат ответа:"
@@ -528,6 +523,7 @@ async def answer_type_selected(callback: types.CallbackQuery, state: FSMContext)
     await state.set_state(TaskForm.answer_content)
 
 
+# ИЗМЕНЕНО: теперь сохраняем media_type (photo/video/document) отдельно
 async def receive_answer(message: types.Message, state: FSMContext):
     data = await state.get_data()
     answer_type = data.get("answer_type", "text")
@@ -537,20 +533,24 @@ async def receive_answer(message: types.Message, state: FSMContext):
             await message.answer("❌ Пожалуйста, отправьте текстовый ответ.")
             return
         content = message.text
+        media_type = None
     else:
         if message.photo:
             content = message.photo[-1].file_id
+            media_type = "photo"
         elif message.document:
             content = message.document.file_id
+            media_type = "document"
         elif message.video:
             content = message.video.file_id
+            media_type = "video"
         else:
             await message.answer("❌ Пожалуйста, отправьте фото, видео или документ.")
             return
 
     task_id = data.get("current_task_id")
     if task_id:
-        await db_update_task_answer(task_id, content, answer_type)
+        await db_update_task_answer(task_id, content, answer_type, media_type)
     await state.clear()
     await message.answer(TEXTS["task_sent"], reply_markup=get_main_menu_kb())
 
@@ -604,24 +604,62 @@ async def adm_top(callback: types.CallbackQuery):
     await callback.answer()
 
 
-async def adm_check_tasks(callback: types.CallbackQuery):
+# ИЗМЕНЕНО: теперь отправляем реальный медиафайл администратору
+async def adm_check_tasks(callback: types.CallbackQuery, bot: Bot):
     tasks = await db_get_pending_tasks()
     if not tasks:
         await callback.answer(TEXTS["no_pending_tasks"], show_alert=True)
         return
     task = tasks[0]
-    if task["answer_type"] == "text":
-        answer_preview = (task["user_answer"] or "")[:500]
-    else:
-        answer_preview = "📎 Медиафайл (прикреплён)"
-    text = (
+
+    caption = (
         f"📋 Проверка задания #{task['id']}\n\n"
         f"👤 Студент: {task['name']}\n"
         f"🆔 ID: {task['user_tg_id']}\n"
-        f"📝 Задание: {task['task_text'][:300]}\n\n"
-        f"💬 Ответ:\n{answer_preview}"
+        f"📝 Задание: {task['task_text'][:300]}"
     )
-    await callback.message.answer(text, reply_markup=get_grading_kb(task["id"]))
+
+    grading_kb = get_grading_kb(task["id"])
+
+    if task["answer_type"] == "text":
+        answer_preview = (task["user_answer"] or "")[:500]
+        await callback.message.answer(
+            caption + f"\n\n💬 Ответ:\n{answer_preview}",
+            reply_markup=grading_kb
+        )
+    else:
+        file_id    = task["user_answer"]
+        media_type = task.get("media_type", "document")
+
+        try:
+            if media_type == "photo":
+                await bot.send_photo(
+                    callback.from_user.id,
+                    photo=file_id,
+                    caption=caption,
+                    reply_markup=grading_kb
+                )
+            elif media_type == "video":
+                await bot.send_video(
+                    callback.from_user.id,
+                    video=file_id,
+                    caption=caption,
+                    reply_markup=grading_kb
+                )
+            else:
+                await bot.send_document(
+                    callback.from_user.id,
+                    document=file_id,
+                    caption=caption,
+                    reply_markup=grading_kb
+                )
+        except Exception as e:
+            logger.error(f"Не удалось отправить медиафайл администратору: {e}")
+            await callback.message.answer(
+                caption + "\n\n⚠️ Не удалось загрузить медиафайл.",
+                reply_markup=grading_kb
+            )
+
     await callback.answer()
 
 
@@ -641,7 +679,6 @@ async def process_grade(callback: types.CallbackQuery, bot: Bot):
 
     result = await db_grade_task(task_id, final_grade)
 
-    # Обрабатываем ситуацию, когда другой админ уже оценил
     if result is False:
         await callback.message.edit_text("⚠️ Кто-то из коллег уже оценил это задание!")
         await callback.answer("Задание уже проверено", show_alert=True)
@@ -650,7 +687,7 @@ async def process_grade(callback: types.CallbackQuery, bot: Bot):
         await callback.answer("Ошибка: задание не найдено.", show_alert=True)
         return
 
-    user_id = result  # Если проверки пройдены, значит тут tg_id пользователя
+    user_id = result
 
     await callback.message.edit_text(f"✅ Оценка «{grade_label}» выставлена.")
     await callback.answer(TEXTS["grade_success"].format(grade=grade_label))
@@ -676,7 +713,6 @@ async def adm_questions(callback: types.CallbackQuery):
 async def adm_select_question(callback: types.CallbackQuery, state: FSMContext):
     q_id = int(callback.data.split("_")[2])  # adm_q_{id}
 
-    # Показываем текст вопроса
     questions = await db_get_new_questions()
     question  = next((q for q in questions if q["id"] == q_id), None)
     if question:
@@ -738,20 +774,19 @@ def register_handlers(dp: Dispatcher):
     dp.message.register(receive_answer,              TaskForm.answer_content)
 
     # --- Вопросы ---
-    # Исправлено: текст кнопки теперь совпадает с тем, что в клавиатуре
     dp.message.register(ask_question,     F.text == "❓ Задать вопрос организатору")
     dp.message.register(process_question, QuestionForm.text)
 
     # --- Админ ---
-    dp.message.register(cmd_admin,           Command("admin"), IsAdmin())
-    dp.callback_query.register(adm_users,        F.data == "adm_users",        IsAdmin())
-    dp.callback_query.register(adm_top,          F.data == "adm_top",           IsAdmin())
-    dp.callback_query.register(adm_check_tasks,  F.data == "adm_check_tasks",   IsAdmin())
-    dp.callback_query.register(process_grade,    F.data.startswith("grade_"),   IsAdmin())
-    dp.callback_query.register(adm_questions,    F.data == "adm_questions",     IsAdmin())
-    dp.callback_query.register(adm_select_question, F.data.startswith("adm_q_"), IsAdmin())
-    dp.message.register(admin_send_answer,       AdminAnswerForm.waiting_answer, IsAdmin())
-    dp.callback_query.register(admin_menu_back,  F.data == "admin_menu",        IsAdmin())
+    dp.message.register(cmd_admin,              Command("admin"), IsAdmin())
+    dp.callback_query.register(adm_users,           F.data == "adm_users",          IsAdmin())
+    dp.callback_query.register(adm_top,             F.data == "adm_top",             IsAdmin())
+    dp.callback_query.register(adm_check_tasks,     F.data == "adm_check_tasks",     IsAdmin())
+    dp.callback_query.register(process_grade,       F.data.startswith("grade_"),     IsAdmin())
+    dp.callback_query.register(adm_questions,       F.data == "adm_questions",       IsAdmin())
+    dp.callback_query.register(adm_select_question, F.data.startswith("adm_q_"),     IsAdmin())
+    dp.message.register(admin_send_answer,          AdminAnswerForm.waiting_answer,  IsAdmin())
+    dp.callback_query.register(admin_menu_back,     F.data == "admin_menu",          IsAdmin())
 
 # ============================================================================
 # MAIN
@@ -774,5 +809,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
