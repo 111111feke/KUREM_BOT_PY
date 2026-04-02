@@ -680,7 +680,11 @@ async def process_grade(callback: types.CallbackQuery, bot: Bot):
     result = await db_grade_task(task_id, final_grade)
 
     if result is False:
-        await callback.message.edit_text("⚠️ Кто-то из коллег уже оценил это задание!")
+        # Пробуем edit_text, если не выйдет — edit_caption
+        try:
+            await callback.message.edit_text("⚠️ Кто-то из коллег уже оценил это задание!")
+        except Exception:
+            await callback.message.edit_caption(caption="⚠️ Кто-то из коллег уже оценил это задание!")
         await callback.answer("Задание уже проверено", show_alert=True)
         return
     elif result is None:
@@ -689,14 +693,18 @@ async def process_grade(callback: types.CallbackQuery, bot: Bot):
 
     user_id = result
 
-    await callback.message.edit_text(f"✅ Оценка «{grade_label}» выставлена.")
+    # ИСПРАВЛЕНО: edit_caption для медиасообщений, edit_text для текстовых
+    try:
+        await callback.message.edit_text(f"✅ Оценка «{grade_label}» выставлена.")
+    except Exception:
+        await callback.message.edit_caption(caption=f"✅ Оценка «{grade_label}» выставлена.")
+
     await callback.answer(TEXTS["grade_success"].format(grade=grade_label))
 
     try:
         await bot.send_message(user_id, notify_msg)
     except Exception as e:
         logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
-
 
 async def adm_questions(callback: types.CallbackQuery):
     questions = await db_get_new_questions()
