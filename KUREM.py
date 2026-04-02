@@ -680,28 +680,22 @@ async def adm_check_tasks(callback: types.CallbackQuery):
 
 
 async def process_grade(callback: types.CallbackQuery, bot: Bot):
-    parts = callback.data.split("_")  # grade_{task_id}_{value}
-    task_id = int(parts[1])
-    grade_val = parts[2]
+    # ... твой код получения task_id и оценки ...
 
-    if grade_val == "rework":
-        final_grade = 0
-        notify_msg = TEXTS["user_rework_notify"]
-        grade_label = "на доработку"
-    else:
-        final_grade = int(grade_val)
-        notify_msg = TEXTS["user_grade_notify"].format(grade=final_grade)
-        grade_label = grade_val
-
-    result = await db_grade_task(task_id, final_grade)
-
-    # Обрабатываем ситуацию, когда другой админ уже оценил
     if result is False:
-        await callback.message.edit_text("⚠️ Кто-то из коллег уже оценил это задание!")
+        text_error = "⚠️ Кто-то из коллег уже оценил это задание!"
+        try:
+            # Пытаемся отредактировать текст (для текстовых ответов)
+            await callback.message.edit_text(text_error)
+        except Exception:
+            try:
+                # Пытаемся отредактировать подпись (для фото/видео)
+                await callback.message.edit_caption(caption=text_error)
+            except Exception:
+                # Если совсем не получается (например, сообщение удалено), просто шлем новое
+                await callback.message.answer(text_error)
+        
         await callback.answer("Задание уже проверено", show_alert=True)
-        return
-    elif result is None:
-        await callback.answer("Ошибка: задание не найдено.", show_alert=True)
         return
 
     user_id = result  # Если проверки пройдены, значит тут tg_id пользователя
