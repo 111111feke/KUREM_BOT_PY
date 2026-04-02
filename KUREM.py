@@ -44,7 +44,7 @@ TASK_TEMPLATES = [
 ]
 
 TEXTS = {
-    "start": "Привет! Это команда проекта «Курем» 👋\n\nБот для геймификации: задания и дополнительные баллы!",
+    "start": "Привет! Это команда проекта «Курем» 👋\n\nКурем — национальный конкурс. Этот бот для заданий и баллов!",
     "privacy": "Перед началом работы ознакомься с Политикой конфиденциальности (ред. 30.03.2026)...",
     "reg_name": "Введи своё ФИО:",
     "reg_vk": "Введи ссылку на свой профиль ВКонтакте:",
@@ -101,7 +101,7 @@ async def _next_id(entity: str) -> int:
     await _write_json(COUNTERS_FILE, counters)
     return counters[entity]
 
-# --- Работа с пользователями ---
+# БД функции (User)
 async def db_get_user(tg_id: int):
     users = await _read_json(USERS_FILE)
     return users.get(str(tg_id))
@@ -116,21 +116,13 @@ async def db_get_rating():
     if not users or isinstance(users, list): return []
     return sorted(users.values(), key=lambda x: x.get("rating_score", 0), reverse=True)
 
-# --- Работа с заданиями ---
+# БД функции (Tasks)
 async def db_create_user_task(user_id: int, template_id: int):
     tasks = await _read_json(TASKS_FILE)
     tid = await _next_id("user_tasks")
     tasks.append({"id": tid, "user_id": user_id, "template_id": template_id, "status": "viewing", "created_at": datetime.now().isoformat()})
     await _write_json(TASKS_FILE, tasks)
     return tid
-
-async def db_mark_task_executing(task_id: int):
-    tasks = await _read_json(TASKS_FILE)
-    for t in tasks:
-        if t["id"] == task_id:
-            t["status"] = "executing"
-            break
-    await _write_json(TASKS_FILE, tasks)
 
 async def db_update_task_answer(task_id: int, answer: str, answer_type: str):
     tasks = await _read_json(TASKS_FILE)
@@ -170,7 +162,7 @@ async def db_grade_task(task_id: int, grade: int):
                 await _write_json(USERS_FILE, users)
     return user_id
 
-# --- Работа с вопросами ---
+# БД функции (Questions)
 async def db_add_question(user_id: int, text: str):
     qs = await _read_json(QUESTIONS_FILE)
     qid = await _next_id("questions")
@@ -186,7 +178,7 @@ async def db_get_new_questions():
     for q in qs:
         if q.get("status") == "new":
             u = users.get(str(q["user_id"]), {})
-            res.append({**q, "name": u.get("name", "Участник")})
+            res.append({**q, "name": u.get("name", "Неизвестный")})
     return res
 
 async def db_answer_question(qid: int, text: str):
@@ -194,7 +186,9 @@ async def db_answer_question(qid: int, text: str):
     uid = None
     for q in qs:
         if q["id"] == qid:
-            q["answer_text"], q["status"], uid = text, "answered", q["user_id"]
+            q["answer_text"] = text
+            q["status"] = "answered"
+            uid = q["user_id"]
             break
     if uid: await _write_json(QUESTIONS_FILE, qs)
     return uid
@@ -226,7 +220,7 @@ class IsAdmin(BaseFilter):
     async def __call__(self, event: types.Message | types.CallbackQuery) -> bool:
         return event.from_user.id in ADMINS
 
-# --- АДМИН: РЕЙТИНГ ---
+# --- АДМИНСКИЙ РЕЙТИНГ ---
 async def adm_show_rating(event: types.Message | types.CallbackQuery):
     rating_data = await db_get_rating()
     if not rating_data:
@@ -237,7 +231,8 @@ async def adm_show_rating(event: types.Message | types.CallbackQuery):
             p = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
             text += f"{p} {u.get('name')} — <b>{u.get('rating_score')}</b> б.\n"
     
-    if isinstance(event, types.Message): await event.answer(text, parse_mode="HTML")
+    if isinstance(event, types.Message):
+        await event.answer(text, parse_mode="HTML")
     else:
         await event.message.answer(text, parse_mode="HTML")
         await event.answer()
@@ -274,7 +269,8 @@ async def reg_institute(message: types.Message, state: FSMContext):
 
 # --- ЗАДАНИЯ ---
 async def do_task(message: types.Message, state: FSMContext):
-    if not await db_get_user(message.from_user.id):
+    user = await db_get_user(message.from_user.id)
+    if not user:
         await message.answer(TEXTS["need_register"])
         return
     tmpl = random.choice(TASK_TEMPLATES)
@@ -284,14 +280,10 @@ async def do_task(message: types.Message, state: FSMContext):
     await message.answer(TEXTS["task"].format(task_text=tmpl["text"]), reply_markup=kb)
 
 async def task_do(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    # СОХРАНЕНИЕ: Ставим статус "В работе"
-    await db_mark_task_executing(data.get("current_task_id"))
-    
     kb = InlineKeyboardBuilder()
     kb.button(text="📝 Текст", callback_data="ans_text")
     kb.button(text="📎 Медиа", callback_data="ans_media")
-    await callback.message.edit_text("Статус: Выполняется ⏳\nВыбери формат ответа:", reply_markup=kb.as_markup())
+    await callback.message.edit_text("Выбери формат ответа:", reply_markup=kb.as_markup())
     await state.set_state(TaskForm.answer_type)
 
 async def answer_type_selected(callback: types.CallbackQuery, state: FSMContext):
@@ -318,28 +310,31 @@ async def ask_question_start(message: types.Message, state: FSMContext):
 
 async def receive_question_text(message: types.Message, state: FSMContext, bot: Bot):
     user = await db_get_user(message.from_user.id)
-    await db_add_question(message.from_user.id, message.text)
+    qid = await db_add_question(message.from_user.id, message.text)
     await state.clear()
-    await message.answer("✅ Отправлено! Ожидай ответа здесь.")
+    await message.answer("✅ Вопрос отправлен! Ожидай ответа в этом чате.")
+    
+    # Уведомляем админов сразу!
     for admin_id in ADMINS:
-        try: await bot.send_message(admin_id, f"❓ **Новый вопрос!**\nОт: {user['name']}\nТекст: {message.text}")
+        try:
+            await bot.send_message(admin_id, f"❓ **Новый вопрос!**\nОт: {user['name']}\nТекст: {message.text}")
         except: pass
 
-# --- АДМИН: ФУНКЦИИ ---
+# --- АДМИН ХЕНДЛЕРЫ ---
 async def cmd_admin(message: types.Message):
     await message.answer(TEXTS["admin_menu"], reply_markup=get_admin_kb())
 
 async def adm_check_tasks(callback: types.CallbackQuery):
     tasks = await db_get_pending_tasks()
     if not tasks:
-        await callback.answer("Заданий нет!", show_alert=True)
+        await callback.answer("Новых заданий нет!", show_alert=True)
         return
     t = tasks[0]
     kb = InlineKeyboardBuilder()
     for i in range(1, 6): kb.button(text=str(i), callback_data=f"grade_{t['id']}_{i}")
     kb.button(text="🔄 Доработка", callback_data=f"grade_{t['id']}_rework")
     kb.adjust(5)
-    cap = f"📋 #{t['id']} | 👤 {t['name']}\n📝 {t['task_text']}"
+    cap = f"📋 Задание #{t['id']}\n👤 {t['name']}\n📝 {t['task_text']}"
     if t["answer_type"] == "text":
         await callback.message.answer(f"{cap}\n\n💬 Ответ: {t['user_answer']}", reply_markup=kb.as_markup())
     else:
@@ -351,10 +346,10 @@ async def process_grade(callback: types.CallbackQuery, bot: Bot):
     parts = callback.data.split("_")
     task_id, val_str = int(parts[1]), parts[2]
     grade_val = 0 if val_str == "rework" else int(val_str)
-    uid = await db_grade_task(task_id, grade_val)
-    if uid:
+    user_id = await db_grade_task(task_id, grade_val)
+    if user_id:
         msg = TEXTS["user_rework_notify"] if grade_val == 0 else TEXTS["user_grade_notify"].format(grade=grade_val)
-        try: await bot.send_message(uid, msg)
+        try: await bot.send_message(user_id, msg)
         except: pass
     await callback.message.delete()
     await callback.answer(f"Оценка: {grade_val}")
@@ -362,42 +357,47 @@ async def process_grade(callback: types.CallbackQuery, bot: Bot):
 async def adm_questions_list(callback: types.CallbackQuery):
     qs = await db_get_new_questions()
     if not qs:
-        await callback.answer("Вопросов нет", show_alert=True)
+        await callback.answer("Новых вопросов нет", show_alert=True)
         return
     kb = InlineKeyboardBuilder()
-    for q in qs: kb.button(text=f"❓ {q['name']}", callback_data=f"adm_q_{q['id']}")
+    for q in qs:
+        kb.button(text=f"❓ {q['name']}", callback_data=f"adm_q_{q['id']}")
     kb.adjust(1)
-    await callback.message.answer("Выбери вопрос:", reply_markup=kb.as_markup())
+    await callback.message.answer("Выбери вопрос для ответа:", reply_markup=kb.as_markup())
     await callback.answer()
 
 async def adm_select_question(callback: types.CallbackQuery, state: FSMContext):
     qid = int(callback.data.split("_")[2])
-    data = await _read_json(QUESTIONS_FILE)
-    q_text = next((q['text'] for q in data if q['id'] == qid), "—")
+    # Находим текст вопроса для удобства админа
+    qs = await _read_json(QUESTIONS_FILE)
+    q_text = next((q['text'] for q in qs if q['id'] == qid), "—")
+    
     await state.update_data(question_id=qid)
-    await callback.message.answer(f"Вопрос: <i>{q_text}</i>\n\nВведи ответ:")
+    await callback.message.answer(f"Вопрос: <i>{q_text}</i>\n\nВведите ваш ответ:")
     await state.set_state(AdminAnswerForm.waiting_answer)
     await callback.answer()
 
 async def admin_send_answer(message: types.Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
-    uid = await db_answer_question(data.get("question_id"), message.text)
+    qid = data.get("question_id")
+    uid = await db_answer_question(qid, message.text)
     if uid:
         try:
-            await bot.send_message(uid, f"📬 **Ответ организатора:**\n\n{message.text}")
-            await message.answer("✅ Ответ отправлен!")
-        except: await message.answer("❌ Ошибка отправки.")
+            await bot.send_message(uid, f"📬 **Ответ от организатора:**\n\n{message.text}")
+            await message.answer("✅ Ответ успешно отправлен пользователю!")
+        except:
+            await message.answer("❌ Ошибка: не удалось отправить сообщение (возможно, бот заблокирован).")
     await state.clear()
 
 # ============================================================================
-# RUN
+# MAIN
 # ============================================================================
 
 async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     
-    # Регистрация хендлеров (Админка в приоритете)
+    # 1. АДМИН (IsAdmin + Команды)
     dp.message.register(cmd_admin, Command("admin"), IsAdmin())
     dp.callback_query.register(adm_show_rating, F.data == "adm_view_rating", IsAdmin())
     dp.callback_query.register(adm_check_tasks, F.data == "adm_check_tasks", IsAdmin())
@@ -406,16 +406,20 @@ async def main():
     dp.callback_query.register(adm_select_question, F.data.startswith("adm_q_"), IsAdmin())
     dp.message.register(admin_send_answer, AdminAnswerForm.waiting_answer, IsAdmin())
 
-    # Юзер
+    # 2. СТАРТ И РЕГИСТРАЦИЯ
     dp.message.register(cmd_start, Command("start"))
     dp.callback_query.register(privacy_agree, F.data == "privacy_agree")
     dp.message.register(reg_name, RegistrationForm.name)
     dp.message.register(reg_vk, RegistrationForm.vk)
     dp.message.register(reg_institute, RegistrationForm.institute)
+
+    # 3. ЗАДАНИЯ
     dp.message.register(do_task, F.text == "📝 Выполнить задание")
     dp.callback_query.register(task_do, F.data == "task_do")
     dp.callback_query.register(answer_type_selected, F.data.startswith("ans_"))
     dp.message.register(receive_answer, TaskForm.answer_content)
+
+    # 4. ВОПРОСЫ (ЮЗЕР)
     dp.message.register(ask_question_start, F.text == "❓ Задать вопрос организатору")
     dp.message.register(receive_question_text, QuestionForm.text)
 
