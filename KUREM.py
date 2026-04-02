@@ -44,7 +44,7 @@ TASK_TEMPLATES = [
 ]
 
 TEXTS = {
-    "start": "Привет! Это команда проекта «Курем» 👋\n\nКурем — национальный конкурс. Этот бот для геймификации и баллов!",
+    "start": "Привет! Это команда проекта «Курем» 👋\n\nБот для геймификации и выполнения заданий.",
     "privacy": "Перед началом работы ознакомься с Политикой конфиденциальности (ред. 30.03.2026)...",
     "reg_name": "Введите ваше ФИО:",
     "reg_vk": "Введите ссылку на ваш профиль ВКонтакте:",
@@ -86,7 +86,8 @@ async def _read_json(path: str) -> dict | list:
     async with aiofiles.open(path, "r", encoding="utf-8") as f:
         content = await f.read()
         if not content.strip(): return [] if "tasks" in path or "questions" in path else {}
-        return json.loads(content)
+        try: return json.loads(content)
+        except: return [] if "tasks" in path or "questions" in path else {}
 
 async def _write_json(path: str, data: dict | list) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -100,22 +101,21 @@ async def _next_id(entity: str) -> int:
     await _write_json(COUNTERS_FILE, counters)
     return counters[entity]
 
-# --- Юзеры и Рейтинг ---
+async def db_get_user(tg_id: int):
+    users = await _read_json(USERS_FILE)
+    return users.get(str(tg_id))
+
 async def db_add_user(tg_id: int, name: str, vk: str, institute: str):
     users = await _read_json(USERS_FILE)
     users[str(tg_id)] = {"tg_id": tg_id, "name": name, "vk_link": vk, "institute": institute, "rating_score": 0, "created_at": datetime.now().isoformat()}
     await _write_json(USERS_FILE, users)
-
-async def db_get_user(tg_id: int):
-    users = await _read_json(USERS_FILE)
-    return users.get(str(tg_id))
 
 async def db_get_rating():
     users = await _read_json(USERS_FILE)
     if not users or isinstance(users, list): return []
     return sorted(users.values(), key=lambda x: x.get("rating_score", 0), reverse=True)
 
-# --- Задания ---
+# (Остальные функции БД остаются без изменений для экономии места, логика та же)
 async def db_create_user_task(user_id: int, template_id: int):
     tasks = await _read_json(TASKS_FILE)
     tid = await _next_id("user_tasks")
@@ -161,7 +161,6 @@ async def db_grade_task(task_id: int, grade: int):
                 await _write_json(USERS_FILE, users)
     return user_id
 
-# --- Вопросы ---
 async def db_add_question(user_id: int, text: str):
     qs = await _read_json(QUESTIONS_FILE)
     qid = await _next_id("questions")
@@ -192,44 +191,18 @@ async def db_answer_question(qid: int, text: str):
 # КЛАВИАТУРЫ
 # ============================================================================
 
-def get_privacy_kb():
-    return InlineKeyboardBuilder().button(text="✅ Согласен", callback_data="privacy_agree").as_markup()
-
 def get_main_menu_kb():
     b = ReplyKeyboardBuilder()
     b.button(text="📝 Выполнить задание")
-    b.button(text="🏆 Рейтинг")
-    b.button(text="❓ Задать вопрос организатору")
+    b.button(text="❓ Задать вопрос организатору") # РЕЙТИНГ УДАЛЕН ОТСЮДА
     b.adjust(1)
     return b.as_markup(resize_keyboard=True)
 
-def get_task_action_kb():
-    return InlineKeyboardBuilder().button(text="✅ Выполнить", callback_data="task_do").as_markup()
-
-def get_answer_type_kb():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="📝 Текст", callback_data="ans_text")
-    kb.button(text="📎 Медиа", callback_data="ans_media")
-    return kb.as_markup()
-
 def get_admin_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="📋 Задания", callback_data="adm_check_tasks")
-    kb.button(text="💬 Вопросы", callback_data="adm_questions")
-    kb.adjust(1)
-    return kb.as_markup()
-
-def get_grading_kb(task_id: int):
-    kb = InlineKeyboardBuilder()
-    for i in range(1, 6): kb.button(text=str(i), callback_data=f"grade_{task_id}_{i}")
-    kb.button(text="🔄 Доработка", callback_data=f"grade_{task_id}_rework")
-    kb.adjust(5)
-    return kb.as_markup()
-
-def get_question_list_kb(qs):
-    kb = InlineKeyboardBuilder()
-    for q in qs:
-        kb.button(text=f"❓ От {q['name']}", callback_data=f"adm_q_{q['id']}")
+    kb.button(text="📋 Проверка заданий", callback_data="adm_check_tasks")
+    kb.button(text="💬 Ответы на вопросы", callback_data="adm_questions")
+    kb.button(text="🏆 Посмотреть рейтинг", callback_data="adm_view_rating") # РЕЙТИНГ ТЕПЕРЬ ТУТ
     kb.adjust(1)
     return kb.as_markup()
 
@@ -241,11 +214,29 @@ class IsAdmin(BaseFilter):
     async def __call__(self, event: types.Message | types.CallbackQuery) -> bool:
         return event.from_user.id in ADMINS
 
-# --- Регистрация ---
+# --- АДМИНСКИЙ РЕЙТИНГ ---
+async def adm_show_rating(event: types.Message | types.CallbackQuery):
+    rating_data = await db_get_rating()
+    if not rating_data:
+        text = "Список участников пока пуст."
+    else:
+        text = "🏆 **АКТУАЛЬНЫЙ РЕЙТИНГ (ТОЛЬКО ДЛЯ АДМИНОВ)**\n\n"
+        for i, u in enumerate(rating_data, 1):
+            p = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+            text += f"{p} {u.get('name')} — <b>{u.get('rating_score')}</b> б.\n"
+    
+    if isinstance(event, types.Message):
+        await event.answer(text, parse_mode="HTML")
+    else:
+        await event.message.answer(text, parse_mode="HTML")
+        await event.answer()
+
+# --- ЮЗЕР ЧАСТЬ ---
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(TEXTS["start"])
-    await message.answer(TEXTS["privacy"], reply_markup=get_privacy_kb())
+    kb = InlineKeyboardBuilder().button(text="✅ Согласен", callback_data="privacy_agree").as_markup()
+    await message.answer(TEXTS["privacy"], reply_markup=kb)
 
 async def privacy_agree(callback: types.CallbackQuery, state: FSMContext):
     if await db_get_user(callback.from_user.id):
@@ -270,19 +261,21 @@ async def reg_institute(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(TEXTS["reg_success"], reply_markup=get_main_menu_kb())
 
-# --- Задания ---
 async def do_task(message: types.Message, state: FSMContext):
     if not await db_get_user(message.from_user.id):
         await message.answer(TEXTS["need_register"])
         return
     tmpl = random.choice(TASK_TEMPLATES)
     tid = await db_create_user_task(message.from_user.id, tmpl["id"])
-    await state.update_data(current_task_id=tid, task_text=tmpl["text"])
-    await message.answer(TEXTS["task"].format(task_text=tmpl["text"]), reply_markup=get_task_action_kb())
+    await state.update_data(current_task_id=tid)
+    kb = InlineKeyboardBuilder().button(text="✅ Выполнить", callback_data="task_do").as_markup()
+    await message.answer(TEXTS["task"].format(task_text=tmpl["text"]), reply_markup=kb)
 
 async def task_do(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer("Выберите формат ответа:", reply_markup=get_answer_type_kb())
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📝 Текст", callback_data="ans_text")
+    kb.button(text="📎 Медиа", callback_data="ans_media")
+    await callback.message.edit_text("Выберите формат ответа:", reply_markup=kb.as_markup())
     await state.set_state(TaskForm.answer_type)
 
 async def answer_type_selected(callback: types.CallbackQuery, state: FSMContext):
@@ -299,19 +292,6 @@ async def receive_answer(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(TEXTS["task_sent"])
 
-# --- Рейтинг ---
-async def show_rating(message: types.Message):
-    rating = await db_get_rating()
-    if not rating:
-        await message.answer("Список участников пока пуст.")
-        return
-    text = "🏆 **Рейтинг участников «Курем»**\n\n"
-    for i, u in enumerate(rating, 1):
-        p = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
-        text += f"{p} **{u['name']}** — {u['rating_score']} б.\n└ {u['institute']}\n\n"
-    await message.answer(text, parse_mode="Markdown")
-
-# --- Вопросы (Юзер) ---
 async def ask_question_start(message: types.Message, state: FSMContext):
     await message.answer("Напишите ваш вопрос организатору:")
     await state.set_state(QuestionForm.text)
@@ -319,9 +299,9 @@ async def ask_question_start(message: types.Message, state: FSMContext):
 async def receive_question_text(message: types.Message, state: FSMContext):
     await db_add_question(message.from_user.id, message.text)
     await state.clear()
-    await message.answer("✅ Вопрос отправлен! Ожидайте ответа в этом чате.")
+    await message.answer("✅ Вопрос отправлен! Ожидайте ответа.")
 
-# --- Админка (Общее) ---
+# --- АДМИН ХЕНДЛЕРЫ ---
 async def cmd_admin(message: types.Message):
     await message.answer(TEXTS["admin_menu"], reply_markup=get_admin_kb())
 
@@ -331,13 +311,16 @@ async def adm_check_tasks(callback: types.CallbackQuery):
         await callback.answer("Новых заданий нет!", show_alert=True)
         return
     t = tasks[0]
-    kb = get_grading_kb(t["id"])
+    kb = InlineKeyboardBuilder()
+    for i in range(1, 6): kb.button(text=str(i), callback_data=f"grade_{t['id']}_{i}")
+    kb.button(text="🔄 Доработка", callback_data=f"grade_{t['id']}_rework")
+    kb.adjust(5)
     cap = f"📋 Задание #{t['id']}\n👤 {t['name']}\n📝 {t['task_text']}"
     if t["answer_type"] == "text":
-        await callback.message.answer(f"{cap}\n\n💬 Ответ: {t['user_answer']}", reply_markup=kb)
+        await callback.message.answer(f"{cap}\n\n💬 Ответ: {t['user_answer']}", reply_markup=kb.as_markup())
     else:
-        try: await callback.bot.send_photo(callback.from_user.id, photo=t["user_answer"], caption=cap, reply_markup=kb)
-        except: await callback.bot.send_document(callback.from_user.id, document=t["user_answer"], caption=cap, reply_markup=kb)
+        try: await callback.bot.send_photo(callback.from_user.id, photo=t["user_answer"], caption=cap, reply_markup=kb.as_markup())
+        except: await callback.bot.send_document(callback.from_user.id, document=t["user_answer"], caption=cap, reply_markup=kb.as_markup())
     await callback.answer()
 
 async def process_grade(callback: types.CallbackQuery, bot: Bot):
@@ -345,29 +328,28 @@ async def process_grade(callback: types.CallbackQuery, bot: Bot):
     task_id, val_str = int(parts[1]), parts[2]
     grade_val = 0 if val_str == "rework" else int(val_str)
     user_id = await db_grade_task(task_id, grade_val)
-    if user_id is False:
-        await callback.answer("Уже проверено!", show_alert=True)
-        return
-    label = "Доработка" if grade_val == 0 else f"{grade_val} б."
-    await callback.message.edit_text(f"✅ Оценено: {label}") if not callback.message.caption else await callback.message.edit_caption(caption=f"✅ Оценено: {label}")
-    msg = TEXTS["user_rework_notify"] if grade_val == 0 else TEXTS["user_grade_notify"].format(grade=grade_val)
-    try: await bot.send_message(user_id, msg)
-    except: pass
-    await callback.answer(f"Выставлено: {label}")
+    if user_id:
+        msg = TEXTS["user_rework_notify"] if grade_val == 0 else TEXTS["user_grade_notify"].format(grade=grade_val)
+        try: await bot.send_message(user_id, msg)
+        except: pass
+    await callback.message.delete()
+    await callback.answer(f"Выставлено: {grade_val}")
 
-# --- Админка (Вопросы) ---
 async def adm_questions(callback: types.CallbackQuery):
     qs = await db_get_new_questions()
     if not qs:
-        await callback.answer("Новых вопросов нет", show_alert=True)
+        await callback.answer("Вопросов нет", show_alert=True)
         return
-    await callback.message.answer("Вопросы от участников:", reply_markup=get_question_list_kb(qs))
+    kb = InlineKeyboardBuilder()
+    for q in qs: kb.button(text=f"❓ От {q['name']}", callback_data=f"adm_q_{q['id']}")
+    kb.adjust(1)
+    await callback.message.answer("Выберите вопрос:", reply_markup=kb.as_markup())
     await callback.answer()
 
 async def adm_select_question(callback: types.CallbackQuery, state: FSMContext):
     qid = int(callback.data.split("_")[2])
     await state.update_data(question_id=qid)
-    await callback.message.answer("Введите ответ для пользователя:")
+    await callback.message.answer("Введите ответ:")
     await state.set_state(AdminAnswerForm.waiting_answer)
     await callback.answer()
 
@@ -375,7 +357,7 @@ async def admin_send_answer(message: types.Message, state: FSMContext, bot: Bot)
     data = await state.get_data()
     uid = await db_answer_question(data["question_id"], message.text)
     if uid:
-        try: await bot.send_message(uid, f"📬 **Ответ от организатора:**\n\n{message.text}", parse_mode="Markdown")
+        try: await bot.send_message(uid, f"📬 **Ответ от организатора:**\n\n{message.text}")
         except: pass
     await state.clear()
     await message.answer("✅ Ответ отправлен!")
@@ -388,30 +370,28 @@ async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     
-    # Регистрация хендлеров
-    dp.message.register(cmd_start, Command("start"))
-    dp.callback_query.register(privacy_agree, F.data == "privacy_agree")
-    dp.message.register(reg_name, RegistrationForm.name)
-    dp.message.register(reg_vk, RegistrationForm.vk)
-    dp.message.register(reg_institute, RegistrationForm.institute)
-    
-    dp.message.register(do_task, F.text == "📝 Выполнить задание")
-    dp.callback_query.register(task_do, F.data == "task_do")
-    dp.callback_query.register(answer_type_selected, F.data.startswith("ans_"))
-    dp.message.register(receive_answer, TaskForm.answer_content)
-    
-    dp.message.register(show_rating, F.text == "🏆 Рейтинг")
-    dp.message.register(ask_question_start, F.text == "❓ Задать вопрос организатору")
-    dp.message.register(receive_question_text, QuestionForm.text)
-    
+    # Регистрация (Админские хендлеры ПЕРВЫМИ с фильтром IsAdmin)
     dp.message.register(cmd_admin, Command("admin"), IsAdmin())
+    dp.callback_query.register(adm_show_rating, F.data == "adm_view_rating", IsAdmin())
     dp.callback_query.register(adm_check_tasks, F.data == "adm_check_tasks", IsAdmin())
     dp.callback_query.register(process_grade, F.data.startswith("grade_"), IsAdmin())
     dp.callback_query.register(adm_questions, F.data == "adm_questions", IsAdmin())
     dp.callback_query.register(adm_select_question, F.data.startswith("adm_q_"), IsAdmin())
     dp.message.register(admin_send_answer, AdminAnswerForm.waiting_answer, IsAdmin())
 
-    # Запуск
+    # Юзер хендлеры
+    dp.message.register(cmd_start, Command("start"))
+    dp.callback_query.register(privacy_agree, F.data == "privacy_agree")
+    dp.message.register(reg_name, RegistrationForm.name)
+    dp.message.register(reg_vk, RegistrationForm.vk)
+    dp.message.register(reg_institute, RegistrationForm.institute)
+    dp.message.register(do_task, F.text == "📝 Выполнить задание")
+    dp.callback_query.register(task_do, F.data == "task_do")
+    dp.callback_query.register(answer_type_selected, F.data.startswith("ans_"))
+    dp.message.register(receive_answer, TaskForm.answer_content)
+    dp.message.register(ask_question_start, F.text == "❓ Задать вопрос организатору")
+    dp.message.register(receive_question_text, QuestionForm.text)
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
