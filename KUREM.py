@@ -1088,33 +1088,45 @@ async def adm_check_tasks(callback: types.CallbackQuery):
 
 
 async def process_grade(callback: types.CallbackQuery, bot: Bot):
-    # ... твой код получения task_id и оценки ...
-
+    # 1. Сначала извлекаем данные из callback_data (grade_ЗАДАНИЕ_ОЦЕНКА)
+    parts = callback.data.split("_")
+    task_id = int(parts[1])
+    # Если нажата кнопка "rework", ставим 0, иначе берем число
+    grade_val = 0 if parts[2] == "rework" else int(parts[2])
+    
+    # 2. ВЫЗЫВАЕМ функцию БД и СОХРАНЯЕМ результат в переменную 'result'
+    # Именно этой строки у тебя не хватало!
+    result = await db_grade_task(task_id, grade_val)
+    
+    # 3. Теперь проверяем 'result'
     if result is False:
         text_error = "⚠️ Кто-то из коллег уже оценил это задание!"
         try:
-            # Пытаемся отредактировать текст (для текстовых ответов)
             await callback.message.edit_text(text_error)
         except Exception:
-            try:
-                # Пытаемся отредактировать подпись (для фото/видео)
-                await callback.message.edit_caption(caption=text_error)
-            except Exception:
-                # Если совсем не получается (например, сообщение удалено), просто шлем новое
-                await callback.message.answer(text_error)
-        
+            await callback.message.edit_caption(caption=text_error)
         await callback.answer("Задание уже проверено", show_alert=True)
         return
 
-    user_id = result  # Если проверки пройдены, значит тут tg_id пользователя
-
-    await callback.message.edit_text(f"✅ Оценка «{grade_label}» выставлена.")
-    await callback.answer(TEXTS["grade_success"].format(grade=grade_label))
-
+    # Если всё ок, result содержит ID пользователя
+    user_id = result 
+    grade_label = "Доработка" if grade_val == 0 else str(grade_val)
+    
+    # 4. Редактируем сообщение админа
+    success_msg = f"✅ Оценка «{grade_label}» выставлена."
     try:
-        await bot.send_message(user_id, notify_msg)
+        await callback.message.edit_text(success_msg)
+    except:
+        await callback.message.edit_caption(caption=success_msg)
+
+    # 5. Уведомляем пользователя
+    msg = TEXTS["user_rework_notify"] if grade_val == 0 else TEXTS["user_grade_notify"].format(grade=grade_val)
+    try:
+        await bot.send_message(user_id, msg)
     except Exception as e:
-        logger.error(f"Не удалось отправить уведомление пользователю {user_id}: {e}")
+        logger.error(f"Не удалось отправить уведомление: {e}")
+
+    await callback.answer(f"Выставлено: {grade_label}")
 
 
 async def adm_questions(callback: types.CallbackQuery):
