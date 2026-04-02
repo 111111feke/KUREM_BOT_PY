@@ -11,7 +11,6 @@ import random
 from datetime import datetime
 
 import aiofiles
-import kb
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command, StateFilter, BaseFilter
 from aiogram.fsm.context import FSMContext
