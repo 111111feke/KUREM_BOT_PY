@@ -9,6 +9,7 @@ import logging
 import os
 import random
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import aiofiles
 from aiogram import Bot, Dispatcher, F, types
@@ -800,6 +801,42 @@ def register_handlers(dp: Dispatcher):
 # MAIN
 # ============================================================================
 
+# ============================================================================
+# ФОНОВЫЕ ЗАДАЧИ
+# ============================================================================
+async def scheduled_mailing(bot: Bot):
+    """Фоновая задача для отправки сообщения в заданное время (по Екатеринбургу)."""
+    target_hour = 18
+    target_minute = 0
+    message_text = "Спасибо за проявленный интерес и участие в проекте «Курем» и не останавливайся на достигнутом!"
+    
+    # Указываем нужный часовой пояс (Екатеринбург: UTC+5)
+    tz_yekaterinburg = ZoneInfo("Asia/Yekaterinburg")
+
+    while True:
+        # Получаем текущее время именно в Екатеринбурге
+        now = datetime.now(tz_yekaterinburg)
+        
+        # Проверяем, наступило ли нужное время
+        if now.hour == target_hour and now.minute == target_minute:
+            logger.info("Запуск запланированной рассылки участникам (по времени Екатеринбурга)...")
+            
+            for user_id in MAILING_LIST:
+                try:
+                    await bot.send_message(user_id, message_text)
+                    logger.info(f"Успешно отправлено участнику {user_id}")
+                except Exception as e:
+                    logger.error(f"Не удалось отправить {user_id}: {e}")
+                
+                # Небольшая пауза, чтобы не превысить лимиты API Telegram
+                await asyncio.sleep(0.05)
+
+            # Засыпаем на 61 секунду, чтобы избежать повторной отправки в ту же самую минуту
+            await asyncio.sleep(61)
+        else:
+            # Спим минуту и проверяем снова
+            await asyncio.sleep(60)
+            
 async def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     bot = Bot(token=BOT_TOKEN)
